@@ -1,18 +1,36 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 
+// ── Constants ─────────────────────────────────────────────────────────────────
 const SCHOOLS = ['Blair','Hill','Hun','Lawrenceville','Mercersburg','Peddie','Pennington']
-const FLIGHT_NAMES = ['Singles #1','Singles #2','Singles #3','Doubles']
+const FLIGHT_NAMES = ['Singles #1','Singles #2','Singles #3','Singles #4','Doubles']
 const ADMIN_PASSWORD = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || 'mapl2025'
-
 const DOWNSTREAM = {1:[4,6,7],2:[5,6],3:[5,7],4:[8,10],5:[7,10],6:[8],7:[9],8:[9],9:[],10:[]}
-const FIXED = {
-  1:{p1:4,p2:5},2:{p1:3,p2:6},3:{p1:2,p2:7},
-  4:{p1:1,p2:null},5:{p1:null,p2:null},6:{p1:null,p2:null},
-  7:{p1:null,p2:null},8:{p1:null,p2:null},9:{p1:null,p2:null},10:{p1:null,p2:null}
-}
+const FIXED = {1:{p1:4,p2:5},2:{p1:3,p2:6},3:{p1:2,p2:7},4:{p1:1,p2:null},5:{p1:null,p2:null},6:{p1:null,p2:null},7:{p1:null,p2:null},8:{p1:null,p2:null},9:{p1:null,p2:null},10:{p1:null,p2:null}}
 
+// Order of play definitions
+const SINGLES_ROUNDS = [
+  { label: 'Round 1', sub: '12 matches — 3 courts per singles flight', matches: [[0,1],[0,2],[0,3],[1,1],[1,2],[1,3],[2,1],[2,2],[2,3],[3,1],[3,2],[3,3]] },
+  { label: 'Round 2', sub: 'Semifinals & consolation play-ins',         matches: [[0,4],[0,5],[0,6],[1,4],[1,5],[1,6],[2,4],[2,5],[2,6],[3,4],[3,5],[3,6]] },
+  { label: 'Round 3', sub: 'Consolation semifinals & winners finals',   matches: [[0,7],[0,8],[0,10],[1,7],[1,8],[1,10],[2,7],[2,8],[2,10],[3,7],[3,8],[3,10]] },
+  { label: 'Round 4', sub: 'Consolation finals',                        matches: [[0,9],[1,9],[2,9],[3,9]] },
+]
+const DOUBLES_ROUNDS = [
+  { label: 'Round 1', matches: [[4,1],[4,2],[4,3]] },
+  { label: 'Round 2', matches: [[4,4],[4,5],[4,6]] },
+  { label: 'Round 3', matches: [[4,7],[4,8],[4,10]] },
+  { label: 'Round 4', matches: [[4,9]] },
+]
+
+// Build global match number maps
+const SINGLES_NUM = {}; let sn = 1
+SINGLES_ROUNDS.forEach(r => r.matches.forEach(([f,l]) => { SINGLES_NUM[`${f}-${l}`] = sn++ }))
+const DOUBLES_NUM = {}; let dn = 1
+DOUBLES_ROUNDS.forEach(r => r.matches.forEach(([f,l]) => { DOUBLES_NUM[`${f}-${l}`] = dn++ }))
+function getMatchNum(f, lid) { return f === 4 ? 'D' + DOUBLES_NUM[`${f}-${lid}`] : '' + SINGLES_NUM[`${f}-${lid}`] }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function emptyFlight(isDoubles) {
   const matches = {}
   for (let id = 1; id <= 10; id++) {
@@ -22,7 +40,7 @@ function emptyFlight(isDoubles) {
   const points = {}
   for (let s = 1; s <= 7; s++) points[s] = 0
   points[1] = 2.5
-  return { players: {}, matches, points }
+  return { players: {}, matches, points, isDoubles }
 }
 
 function recomputePoints(flight) {
@@ -41,11 +59,7 @@ function recomputePoints(flight) {
 
 function collectDownstream(matchId) {
   const visited = new Set()
-  function walk(id) {
-    if (visited.has(id)) return
-    visited.add(id)
-    ;(DOWNSTREAM[id] || []).forEach(walk)
-  }
+  function walk(id) { if (visited.has(id)) return; visited.add(id); (DOWNSTREAM[id]||[]).forEach(walk) }
   walk(matchId)
   return [...visited]
 }
@@ -53,121 +67,162 @@ function collectDownstream(matchId) {
 function fmtScore(scores, proset, wSlot) {
   if (!scores) return ''
   if (proset) {
-    const w = wSlot === 1 ? scores.p1sets[0] : scores.p2sets[0]
-    const l = wSlot === 1 ? scores.p2sets[0] : scores.p1sets[0]
+    const w = wSlot===1 ? scores.p1sets[0] : scores.p2sets[0]
+    const l = wSlot===1 ? scores.p2sets[0] : scores.p1sets[0]
     return `${w}–${l}`
   }
   return scores.p1sets.map((g1, s) => {
     const g2 = scores.p2sets[s]
-    if (g1 === undefined || g2 === undefined) return null
-    const w = wSlot === 1 ? g1 : g2
-    const l = wSlot === 1 ? g2 : g1
-    const tbL = wSlot === 1 ? scores.tb2?.[s] : scores.tb1?.[s]
-    return `${w}–${l}${tbL !== undefined && tbL !== '' ? `(${tbL})` : ''}`
+    if (g1===undefined||g2===undefined) return null
+    const w = wSlot===1 ? g1 : g2, l = wSlot===1 ? g2 : g1
+    const tbL = wSlot===1 ? scores.tb2?.[s] : scores.tb1?.[s]
+    return `${w}–${l}${tbL!==undefined&&tbL!=='' ? `(${tbL})` : ''}`
   }).filter(Boolean).join('  ')
 }
 
+function vSet(a,b) { const hi=Math.max(a,b),lo=Math.min(a,b); return (hi===7&&lo===6)||(hi===6&&lo<=5) }
+function vSTB(a,b) { return !isNaN(a)&&!isNaN(b)&&Math.max(a,b)>=10&&Math.abs(a-b)>=2 }
+
 // ── Styles ────────────────────────────────────────────────────────────────────
+const copper = '#B5651D'
+const copperLight = '#D4854A'
+const copperDark = '#8B4513'
+const copperBg = '#FBF4EE'
+
 const S = {
-  wrap: { maxWidth: 1100, margin: '0 auto', padding: '16px 16px 60px' },
-  header: { borderBottom: '1px solid #ddd', paddingBottom: 12, marginBottom: 16 },
-  h1: { fontSize: 24, fontWeight: 600, margin: 0 },
-  sub: { fontSize: 13, color: '#666', marginTop: 4 },
-  tabs: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 20 },
-  tab: { fontSize: 13, padding: '6px 14px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 8, background: 'white', color: '#555' },
-  tabActive: { fontSize: 13, padding: '6px 14px', cursor: 'pointer', border: '1px solid #333', borderRadius: 8, background: '#f0f0f0', color: '#111', fontWeight: 600 },
-  card: { background: 'white', borderRadius: 10, border: '1px solid #e0e0e0', overflow: 'hidden', width: 220, minWidth: 220 },
-  cardTitle: { fontSize: 11, fontWeight: 600, color: '#888', padding: '4px 8px', borderBottom: '1px solid #eee', background: '#f9f9f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
-  playerRow: { display: 'flex', alignItems: 'center', padding: '5px 8px', gap: 6, borderBottom: '1px solid #f0f0f0', minHeight: 40 },
-  playerRowWinner: { display: 'flex', alignItems: 'center', padding: '5px 8px', gap: 6, borderBottom: '1px solid #f0f0f0', minHeight: 40, background: '#EAF3DE' },
-  playerRowLoser: { display: 'flex', alignItems: 'center', padding: '5px 8px', gap: 6, borderBottom: '1px solid #f0f0f0', minHeight: 40, opacity: 0.45 },
-  badge: { fontSize: 10, fontWeight: 600, background: '#f0f0f0', border: '1px solid #ddd', borderRadius: 4, padding: '1px 5px', color: '#666', minWidth: 20, textAlign: 'center' },
-  pname: { fontSize: 13, color: '#111', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  pnameW: { fontSize: 13, color: '#3B6D11', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  schoolTag: { fontSize: 10, color: '#888' },
-  schoolTagW: { fontSize: 10, color: '#3B6D11', opacity: 0.8 },
-  setScores: { fontSize: 11, color: '#3B6D11', whiteSpace: 'nowrap', fontWeight: 600 },
-  empty: { fontSize: 12, color: '#aaa', fontStyle: 'italic', flex: 1 },
-  roundLabel: { fontSize: 11, fontWeight: 600, color: '#888', textAlign: 'center', marginBottom: 8, width: 220 },
-  bracketWrap: { display: 'flex', alignItems: 'stretch', overflowX: 'auto', paddingBottom: 8 },
-  round: { display: 'flex', flexDirection: 'column' },
-  editBtn: { fontSize: 10, padding: '2px 6px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: 'transparent', color: '#888' },
-  genBtn: { fontSize: 14, padding: '9px 22px', cursor: 'pointer', background: '#f0f0f0', border: '1px solid #999', borderRadius: 8, fontWeight: 600 },
-  resetBtn: { fontSize: 12, padding: '5px 12px', cursor: 'pointer', background: 'transparent', border: '1px solid #ccc', borderRadius: 8, color: '#888', marginBottom: 16 },
-  section: { paddingBottom: 24 },
-  h2: { fontSize: 18, fontWeight: 600, marginBottom: 12 },
-  setupGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 20, marginBottom: 20 },
-  setupFlight: { background: 'white', borderRadius: 10, border: '1px solid #e0e0e0', padding: '16px 18px' },
-  seedBlock: { border: '1px solid #eee', borderRadius: 8, background: '#fafafa', padding: '10px 12px', marginBottom: 8 },
-  fieldLabel: { fontSize: 10, color: '#aaa', marginBottom: 3 },
-  textInput: { width: '100%', fontSize: 13, padding: '6px 8px', border: '1px solid #ddd', borderRadius: 6, background: 'white', marginBottom: 6, boxSizing: 'border-box' },
-  select: { width: '100%', fontSize: 13, padding: '6px 8px', border: '1px solid #ddd', borderRadius: 6, background: 'white', boxSizing: 'border-box' },
-  selectDup: { width: '100%', fontSize: 13, padding: '6px 8px', border: '1px solid #D85A30', borderRadius: 6, background: '#FAECE7', boxSizing: 'border-box' },
+  appWrap: { minHeight: '100vh', background: '#FAFAF8', backgroundImage: 'radial-gradient(circle at 20% 20%, rgba(181,101,29,0.05) 0%, transparent 50%), radial-gradient(circle at 80% 80%, rgba(181,101,29,0.05) 0%, transparent 50%)' },
+  header: { background: 'linear-gradient(135deg, #1a1a1a 0%, #2d1a0a 60%, #1a0f05 100%)', position: 'relative', overflow: 'hidden' },
+  headerInner: { maxWidth: 1100, margin: '0 auto', padding: '20px 16px 16px', display: 'flex', alignItems: 'center', gap: 20 },
+  headerTitle: { fontSize: 26, fontWeight: 700, color: 'white', letterSpacing: 0.5, lineHeight: 1.1, marginBottom: 4 },
+  headerSub: { fontSize: 11, color: 'rgba(255,255,255,0.5)', letterSpacing: 1, textTransform: 'uppercase' },
+  headerSchools: { fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 6 },
+  copperBar: { height: 3, background: `linear-gradient(90deg, ${copperDark}, ${copperLight}, ${copperDark})` },
+  tabsWrap: { background: 'white', borderBottom: '1px solid #ece8e3', position: 'sticky', top: 0, zIndex: 10 },
+  tabsInner: { maxWidth: 1100, margin: '0 auto', padding: '0 16px', display: 'flex', overflowX: 'auto' },
+  tab: { fontSize: 13, padding: '12px 16px', cursor: 'pointer', border: 'none', borderBottom: '3px solid transparent', background: 'transparent', color: '#999', whiteSpace: 'nowrap', fontWeight: 500 },
+  tabActive: { fontSize: 13, padding: '12px 16px', cursor: 'pointer', border: 'none', borderBottom: `3px solid ${copper}`, background: 'transparent', color: copper, whiteSpace: 'nowrap', fontWeight: 600 },
+  inner: { maxWidth: 1100, margin: '0 auto', padding: '0 16px 60px' },
+  pageTitle: { fontSize: 20, fontWeight: 600, color: '#1a1a1a', marginBottom: 6, marginTop: 24 },
+  pageSub: { fontSize: 13, color: '#999', marginBottom: 20 },
+  sectionHead: { fontSize: 16, fontWeight: 600, color: '#1a1a1a', marginBottom: 12, paddingLeft: 10, borderLeft: `3px solid ${copper}` },
+  sectionHeadBlue: { fontSize: 16, fontWeight: 600, color: '#185FA5', marginBottom: 12, paddingLeft: 10, borderLeft: '3px solid #185FA5' },
+  setupGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20, marginBottom: 20 },
+  setupFlight: { background: 'white', borderRadius: 12, border: '1px solid #ece8e3', padding: '16px 18px', boxShadow: '0 1px 4px rgba(0,0,0,0.04)' },
+  flightTitleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid #f0ebe5' },
+  flightTitleText: { fontSize: 13, fontWeight: 600, color: '#1a1a1a' },
+  flightBadge: { fontSize: 10, color: copper, background: copperBg, border: `1px solid rgba(181,101,29,0.2)`, borderRadius: 4, padding: '2px 7px', fontWeight: 500 },
+  seedBlock: { border: '1px solid #f0ebe5', borderRadius: 8, padding: '10px 12px', marginBottom: 8, background: '#FDFCFB' },
+  seedHeader: { fontSize: 11, fontWeight: 600, color: '#bbb', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
+  fieldLabel: { fontSize: 10, color: '#ccc', marginBottom: 3, textTransform: 'uppercase', letterSpacing: 0.3 },
+  textInput: { width: '100%', fontSize: 13, padding: '7px 9px', border: '1px solid #e0dbd5', borderRadius: 6, background: 'white', marginBottom: 6, boxSizing: 'border-box', color: '#1a1a1a', fontFamily: 'inherit' },
+  select: { width: '100%', fontSize: 13, padding: '7px 9px', border: '1px solid #e0dbd5', borderRadius: 6, background: 'white', boxSizing: 'border-box', color: '#1a1a1a', fontFamily: 'inherit' },
+  selectDup: { width: '100%', fontSize: 13, padding: '7px 9px', border: '1px solid #D85A30', borderRadius: 6, background: '#FFF0EB', boxSizing: 'border-box', color: '#1a1a1a', fontFamily: 'inherit' },
   dupMsg: { fontSize: 10, color: '#D85A30', marginTop: 3 },
-  errMsg: { fontSize: 12, color: '#c0392b', marginTop: 8 },
+  genBtn: { fontSize: 14, padding: '10px 24px', cursor: 'pointer', background: `linear-gradient(135deg, ${copper}, ${copperLight})`, border: 'none', borderRadius: 8, color: 'white', fontWeight: 600, boxShadow: '0 2px 8px rgba(181,101,29,0.3)', fontFamily: 'inherit' },
+  resetBtn: { fontSize: 12, padding: '5px 12px', cursor: 'pointer', background: 'transparent', border: '1px solid #ddd', borderRadius: 8, color: '#aaa', marginBottom: 16, fontFamily: 'inherit' },
+  bracketWrap: { display: 'flex', alignItems: 'stretch', overflowX: 'auto', paddingBottom: 8, marginBottom: 24 },
+  round: { display: 'flex', flexDirection: 'column' },
+  matchCard: { background: 'white', border: '1px solid #ece8e3', borderRadius: 10, width: 220, minWidth: 220, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.05)' },
+  matchCardClickable: { background: 'white', border: '1px solid #ece8e3', borderRadius: 10, width: 220, minWidth: 220, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', cursor: 'pointer' },
+  matchTitle: { fontSize: 11, fontWeight: 600, color: '#aaa', padding: '5px 9px', borderBottom: '1px solid #f0ebe5', background: '#FDFCFB', display: 'flex', justifyContent: 'space-between', alignItems: 'center', textTransform: 'uppercase', letterSpacing: 0.3 },
+  editBtn: { fontSize: 10, padding: '2px 7px', cursor: 'pointer', border: '1px solid #ddd', borderRadius: 4, background: 'transparent', color: '#bbb', textTransform: 'none', letterSpacing: 0, fontFamily: 'inherit' },
+  playerRow: { display: 'flex', alignItems: 'center', padding: '6px 9px', gap: 7, borderBottom: '1px solid #f5f3f0', minHeight: 40 },
+  playerRowWinner: { display: 'flex', alignItems: 'center', padding: '6px 9px', gap: 7, borderBottom: '1px solid #f5f3f0', minHeight: 40, background: 'linear-gradient(90deg, #EAF3DE, #F4FAF0)' },
+  playerRowLoser: { display: 'flex', alignItems: 'center', padding: '6px 9px', gap: 7, borderBottom: '1px solid #f5f3f0', minHeight: 40, opacity: 0.4 },
+  seedBadge: { fontSize: 10, fontWeight: 700, background: '#F5F0EB', border: '1px solid #E8E0D5', borderRadius: 4, padding: '1px 5px', color: '#aaa', minWidth: 22, textAlign: 'center', flexShrink: 0 },
+  seedBadgeWinner: { fontSize: 10, fontWeight: 700, background: '#D4EABC', border: '1px solid #B5D990', borderRadius: 4, padding: '1px 5px', color: '#3B6D11', minWidth: 22, textAlign: 'center', flexShrink: 0 },
+  playerInfo: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center' },
+  pname: { fontSize: 13, color: '#1a1a1a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.3 },
+  pnameW: { fontSize: 13, color: '#3B6D11', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.3 },
+  schoolTag: { fontSize: 10, color: '#bbb', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  schoolTagW: { fontSize: 10, color: '#5A9020', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  setScores: { fontSize: 11, color: '#5A9020', whiteSpace: 'nowrap', fontWeight: 600, flexShrink: 0 },
+  emptySlot: { fontSize: 12, color: '#ccc', fontStyle: 'italic', flex: 1 },
+  roundLabel: { fontSize: 10, fontWeight: 600, color: '#ccc', textAlign: 'center', marginBottom: 8, width: 220, textTransform: 'uppercase', letterSpacing: 0.5 },
+  // OOP
+  oopRoundHeader: { fontSize: 13, fontWeight: 600, color: '#1a1a1a', padding: '9px 14px', marginBottom: 8, background: 'white', borderRadius: 8, border: '1px solid #ece8e3', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' },
+  oopRoundSub: { fontSize: 11, color: '#bbb', fontWeight: 400 },
+  oopDoublesHeader: { fontSize: 13, fontWeight: 600, color: '#185FA5', padding: '9px 14px', background: '#EAF1FB', borderRadius: 8, border: '1px solid #C5D8F0', marginBottom: 8, display: 'flex', justifyContent: 'space-between' },
+  oopMatch: { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', border: '1px solid #ece8e3', borderRadius: 8, background: 'white', marginBottom: 6, boxShadow: '0 1px 2px rgba(0,0,0,0.03)' },
+  oopMatchIP: { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', border: `1px solid ${copperLight}`, borderRadius: 8, background: copperBg, marginBottom: 6 },
+  oopMatchDone: { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', border: '1px solid #eee', borderRadius: 8, background: '#FAFAF8', marginBottom: 6, opacity: 0.55 },
+  oopMatchWait: { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', border: '1px solid #f0f0f0', borderRadius: 8, background: 'white', marginBottom: 6, opacity: 0.35 },
+  oopNum: { fontSize: 15, fontWeight: 700, color: copper, minWidth: 40 },
+  oopNumD: { fontSize: 15, fontWeight: 700, color: '#185FA5', minWidth: 40 },
+  oopFlight: { fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 4, background: '#F5F0EB', color: copperDark, flexShrink: 0, textTransform: 'uppercase', letterSpacing: 0.3 },
+  oopFlightD: { fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 4, background: '#EAF1FB', color: '#185FA5', flexShrink: 0, textTransform: 'uppercase', letterSpacing: 0.3 },
+  oopPlayers: { flex: 1, fontSize: 12, color: '#444' },
+  oopScore: { fontSize: 12, color: '#5A9020', fontWeight: 600, whiteSpace: 'nowrap' },
+  oopStatusReady: { fontSize: 11, fontWeight: 600, padding: '4px 10px', borderRadius: 6, flexShrink: 0, cursor: 'pointer', background: '#F5F0EB', color: copper, border: `1px solid rgba(181,101,29,0.3)`, fontFamily: 'inherit' },
+  oopStatusIP: { fontSize: 11, fontWeight: 600, padding: '4px 10px', borderRadius: 6, flexShrink: 0, cursor: 'pointer', background: copperBg, color: copperDark, border: `1px solid ${copperLight}`, fontFamily: 'inherit' },
+  oopStatusDone: { fontSize: 11, fontWeight: 600, padding: '4px 10px', borderRadius: 6, flexShrink: 0, background: '#EAF3DE', color: '#3B6D11', border: '1px solid #C5E0A0', fontFamily: 'inherit' },
+  oopStatusWait: { fontSize: 11, fontWeight: 600, padding: '4px 10px', borderRadius: 6, flexShrink: 0, background: '#F5F5F5', color: '#ddd', border: '1px solid #f0f0f0', fontFamily: 'inherit' },
   // leaderboard
-  lbRow: { background: 'white', border: '1px solid #e0e0e0', borderRadius: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 },
-  lbRank: { fontSize: 20, fontWeight: 700, minWidth: 28, color: '#ccc' },
-  lbName: { fontSize: 15, fontWeight: 600, flex: 1 },
-  lbBd: { fontSize: 11, color: '#888', marginTop: 2 },
-  lbTotal: { fontSize: 22, fontWeight: 700, minWidth: 52, textAlign: 'right' },
+  lbCard: { background: 'white', border: '1px solid #ece8e3', borderRadius: 12, padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 14, boxShadow: '0 1px 4px rgba(0,0,0,0.05)', marginBottom: 10 },
+  lbRank: { fontSize: 22, fontWeight: 700, minWidth: 32, color: '#ddd' },
+  lbName: { fontSize: 15, fontWeight: 600, color: '#1a1a1a' },
+  lbBd: { fontSize: 11, color: '#bbb', marginTop: 3 },
+  lbPts: { fontSize: 24, fontWeight: 700, color: copper, minWidth: 56, textAlign: 'right' },
+  // pts card
+  ptsCard: { background: 'white', borderRadius: 8, border: '1px solid #ece8e3', padding: '10px 14px', minWidth: 120, boxShadow: '0 1px 3px rgba(0,0,0,0.04)' },
+  ptsName: { fontSize: 11, color: '#999', marginBottom: 2 },
+  ptsSchool: { fontSize: 10, color: '#ccc', marginBottom: 4 },
+  ptsVal: { fontSize: 20, fontWeight: 700, color: copper },
   // modal
   modalBg: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
-  modal: { background: 'white', borderRadius: 12, padding: '20px 24px', width: 420, maxWidth: '95vw', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 8px 32px rgba(0,0,0,0.15)' },
-  warnBox: { background: '#FAECE7', border: '1px solid #F0997B', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#712B13', marginBottom: 16 },
-  winBtn: { flex: 1, minWidth: 130, padding: '10px 8px', fontSize: 13, cursor: 'pointer', border: '1px solid #ccc', borderRadius: 8, background: '#f9f9f9', textAlign: 'center', lineHeight: 1.5 },
-  // admin
+  modal: { background: 'white', borderRadius: 14, padding: '22px 26px', width: 420, maxWidth: '95vw', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 8px 40px rgba(0,0,0,0.18)' },
+  warnBox: { background: '#FFF0EB', border: '1px solid #F0997B', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#712B13', marginBottom: 16 },
   adminBar: { background: '#1a1a2e', color: 'white', padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 12, fontSize: 13 },
-  adminDot: { width: 8, height: 8, borderRadius: '50%', background: '#27ae60' },
-  lockBox: { background: 'white', borderRadius: 12, padding: 32, maxWidth: 340, margin: '60px auto', boxShadow: '0 4px 16px rgba(0,0,0,0.1)', textAlign: 'center' },
+  adminDot: { width: 8, height: 8, borderRadius: '50%', background: '#27ae60', flexShrink: 0 },
+  lockBox: { background: 'white', borderRadius: 14, padding: 36, maxWidth: 360, margin: '80px auto', boxShadow: '0 4px 20px rgba(0,0,0,0.1)', textAlign: 'center' },
 }
 
-// ── Connector lines ────────────────────────────────────────────────────────────
+// ── SVG Maple Leaf ────────────────────────────────────────────────────────────
+function MapleLeaf({ size = 64 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <polygon points="32,4 36,20 50,12 42,26 58,24 46,34 56,46 40,42 36,58 32,46 28,58 24,42 8,46 18,34 6,24 22,26 14,12 28,20" fill="#B5651D" opacity="0.9"/>
+      <polygon points="32,10 35,22 46,16 40,27 54,26 44,34 52,44 38,41 35,54 32,44 29,54 26,41 12,44 20,34 10,26 24,27 18,16 29,22" fill="#D4854A" opacity="0.5"/>
+    </svg>
+  )
+}
+
+// ── VConn ────────────────────────────────────────────────────────────────────
 function VConn({ n }) {
-  const border = '1px solid #ccc'
-  if (n === 3) return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: 32, alignSelf: 'stretch' }}>
-      <div style={{ flex: 2, borderRight: border, borderBottom: border }} />
-      <div style={{ flex: 1 }} />
-      <div style={{ flex: 2, borderRight: border, borderTop: border }} />
-    </div>
-  )
-  if (n === 2) return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: 32, alignSelf: 'stretch' }}>
-      <div style={{ flex: 1, borderRight: border, borderBottom: border }} />
-      <div style={{ flex: 1, borderRight: border }} />
-    </div>
-  )
-  return <div style={{ display: 'flex', flexDirection: 'column', width: 32, alignSelf: 'stretch' }}>
-    <div style={{ flex: 1, borderRight: border }} />
-  </div>
+  const b = '1px solid #e8e0d5'
+  const base = { display: 'flex', flexDirection: 'column', width: 32, alignSelf: 'stretch' }
+  if (n === 3) return <div style={base}><div style={{ flex: 2, borderRight: b, borderBottom: b }}/><div style={{ flex: 1 }}/><div style={{ flex: 2, borderRight: b, borderTop: b }}/></div>
+  if (n === 2) return <div style={base}><div style={{ flex: 1, borderRight: b, borderBottom: b }}/><div style={{ flex: 1, borderRight: b }}/></div>
+  return <div style={base}><div style={{ flex: 1, borderRight: b }}/></div>
 }
 
-// ── Match Card ─────────────────────────────────────────────────────────────────
-function MatchCard({ flight, matchId, isAdmin, onOpen, onEdit }) {
-  const m = flight.matches[matchId]
+// ── Match Card ────────────────────────────────────────────────────────────────
+function MatchCard({ flight, localId, isAdmin, onOpen, onEdit }) {
+  const m = flight.matches[localId]
   const isDoubles = flight.isDoubles
   if (!m) return null
+  const num = getMatchNum(flight.flightIdx, localId)
+  const clickable = !m.winner && isAdmin
 
   return (
-    <div style={{ ...S.card, cursor: !m.winner && isAdmin ? 'pointer' : 'default' }}
-      onClick={() => !m.winner && isAdmin && onOpen(matchId)}>
-      <div style={S.cardTitle}>
-        <span>Match {matchId}{m.proset && !m.scores ? ' · proset' : ''}</span>
-        {m.winner && isAdmin && <button style={S.editBtn} onClick={e => { e.stopPropagation(); onEdit(matchId) }}>Edit</button>}
+    <div style={clickable ? S.matchCardClickable : S.matchCard}
+      onClick={() => clickable && onOpen(localId)}>
+      <div style={S.matchTitle}>
+        <span>Match {num}{m.proset && !m.scores ? ' · proset' : ''}</span>
+        {m.winner && isAdmin && <button style={S.editBtn} onClick={e => { e.stopPropagation(); onEdit(localId) }}>Edit</button>}
       </div>
       {[m.p1, m.p2].map((seed, idx) => {
         const isW = m.winner && seed === m.winner
         const isL = m.winner && seed && seed !== m.winner
         const rowStyle = isW ? S.playerRowWinner : isL ? S.playerRowLoser : S.playerRow
-        if (!seed) return <div key={idx} style={rowStyle}><span style={S.empty}>TBD</span></div>
+        if (!seed) return <div key={idx} style={{ ...rowStyle, borderBottom: idx === 0 ? '1px solid #f5f3f0' : 'none' }}><span style={S.emptySlot}>TBD</span></div>
         const p = flight.players[seed]
-        if (!p) return <div key={idx} style={rowStyle}><span style={S.empty}>TBD</span></div>
+        if (!p) return <div key={idx} style={rowStyle}><span style={S.emptySlot}>TBD</span></div>
         const sc = isW && m.scores ? fmtScore(m.scores, m.proset, seed === m.p1 ? 1 : 2) : ''
         return (
-          <div key={idx} style={rowStyle}>
-            <span style={S.badge}>{p.seed}</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div key={idx} style={{ ...rowStyle, borderBottom: idx === 0 ? '1px solid #f5f3f0' : 'none' }}>
+            <span style={isW ? S.seedBadgeWinner : S.seedBadge}>{p.seed}</span>
+            <div style={S.playerInfo}>
               <div style={isW ? S.pnameW : S.pname}>{p.name}</div>
               {!isDoubles && <div style={isW ? S.schoolTagW : S.schoolTag}>{p.school}</div>}
             </div>
@@ -179,96 +234,86 @@ function MatchCard({ flight, matchId, isAdmin, onOpen, onEdit }) {
   )
 }
 
-// ── Score Modal ────────────────────────────────────────────────────────────────
-function ScoreModal({ flight, matchId, flightIdx, isDoubles, onClose, onAdvance, onSaveScores }) {
-  const m = flight.matches[matchId]
-  const p1 = flight.players[m.p1]
-  const p2 = flight.players[m.p2]
+// ── Score Modal ───────────────────────────────────────────────────────────────
+function ScoreModal({ flight, localId, onClose, onAdvance, onSaveScores }) {
+  const m = flight.matches[localId]
+  const p1 = flight.players[m.p1], p2 = flight.players[m.p2]
+  const isDoubles = flight.isDoubles
   const [isProset, setIsProset] = useState(m.proset)
-  const [scores, setScores] = useState(() => {
-    if (m.scores) return JSON.parse(JSON.stringify(m.scores))
-    return { p1sets: ['', ''], p2sets: ['', ''], tb1: {}, tb2: {}, s3p1: '', s3p2: '' }
-  })
-  const [psScores, setPsScores] = useState({ v1: m.scores?.p1sets?.[0] ?? '', v2: m.scores?.p2sets?.[0] ?? '' })
+  const [s1p1, setS1p1] = useState(m.scores?.p1sets?.[0] ?? '')
+  const [s1p2, setS1p2] = useState(m.scores?.p2sets?.[0] ?? '')
+  const [s2p1, setS2p1] = useState(m.scores?.p1sets?.[1] ?? '')
+  const [s2p2, setS2p2] = useState(m.scores?.p2sets?.[1] ?? '')
+  const [s3p1, setS3p1] = useState(m.scores?.p1sets?.[2] ?? '')
+  const [s3p2, setS3p2] = useState(m.scores?.p2sets?.[2] ?? '')
+  const [tb1_0, setTb1_0] = useState(m.scores?.tb1?.[0] ?? '')
+  const [tb2_0, setTb2_0] = useState(m.scores?.tb2?.[0] ?? '')
+  const [tb1_1, setTb1_1] = useState(m.scores?.tb1?.[1] ?? '')
+  const [tb2_1, setTb2_1] = useState(m.scores?.tb2?.[1] ?? '')
+  const [psV1, setPsV1] = useState(m.scores?.p1sets?.[0] ?? '')
+  const [psV2, setPsV2] = useState(m.scores?.p2sets?.[0] ?? '')
   const [err, setErr] = useState('')
 
-  function vSet(a, b) { const hi = Math.max(a, b), lo = Math.min(a, b); return (hi === 7 && lo === 6) || (hi === 6 && lo <= 5) }
-  function vSTB(a, b) { return !isNaN(a) && !isNaN(b) && Math.max(a, b) >= 10 && Math.abs(a - b) >= 2 }
-
-  function showTB(setIdx) {
-    const a = parseInt(scores.p1sets[setIdx]), b = parseInt(scores.p2sets[setIdx])
-    return (a === 7 && b === 6) || (a === 6 && b === 7)
-  }
+  const showTB0 = (parseInt(s1p1)===7&&parseInt(s1p2)===6)||(parseInt(s1p1)===6&&parseInt(s1p2)===7)
+  const showTB1 = (parseInt(s2p1)===7&&parseInt(s2p2)===6)||(parseInt(s2p1)===6&&parseInt(s2p2)===7)
 
   function buildAndSave(winnerSeed) {
     let builtScores
-    if (isProset) {
-      const v1 = parseInt(psScores.v1), v2 = parseInt(psScores.v2)
-      if (isNaN(v1) || isNaN(v2)) { setErr('Enter game counts.'); return }
-      if (Math.max(v1, v2) < 8 || Math.abs(v1 - v2) < 2) { setErr('Proset: first to 8, win by 2.'); return }
-      builtScores = { p1sets: [v1], p2sets: [v2], proset: true }
+    if (isProset || isDoubles) {
+      const v1 = parseInt(psV1), v2 = parseInt(psV2)
+      if (isNaN(v1)||isNaN(v2)) { setErr('Enter game counts.'); return }
+      if (Math.max(v1,v2)<8||Math.abs(v1-v2)<2) { setErr('Proset: first to 8, win by 2.'); return }
+      builtScores = { p1sets:[v1], p2sets:[v2], proset:true }
     } else {
-      const s1p1 = parseInt(scores.p1sets[0]), s1p2 = parseInt(scores.p2sets[0])
-      const s2p1 = parseInt(scores.p1sets[1]), s2p2 = parseInt(scores.p2sets[1])
-      const s3p1 = scores.s3p1 !== '' ? parseInt(scores.s3p1) : null
-      const s3p2 = scores.s3p2 !== '' ? parseInt(scores.s3p2) : null
-      const has3 = s3p1 !== null && s3p2 !== null
-      if (isNaN(s1p1) || isNaN(s1p2)) { setErr('Enter Set 1 scores.'); return }
-      if (!vSet(s1p1, s1p2)) { setErr('Set 1 invalid (e.g. 6–4, 7–5, 7–6).'); return }
-      if (isNaN(s2p1) || isNaN(s2p2)) { setErr('Enter Set 2 scores.'); return }
-      if (!vSet(s2p1, s2p2)) { setErr('Set 2 invalid.'); return }
+      const a1=parseInt(s1p1),b1=parseInt(s1p2),a2=parseInt(s2p1),b2=parseInt(s2p2)
+      const a3=s3p1!==''?parseInt(s3p1):null, b3=s3p2!==''?parseInt(s3p2):null
+      const has3 = a3!==null&&b3!==null
+      if (isNaN(a1)||isNaN(b1)) { setErr('Enter Set 1 scores.'); return }
+      if (!vSet(a1,b1)) { setErr('Set 1 invalid (e.g. 6–4, 7–5, 7–6).'); return }
+      if (isNaN(a2)||isNaN(b2)) { setErr('Enter Set 2 scores.'); return }
+      if (!vSet(a2,b2)) { setErr('Set 2 invalid.'); return }
       if (has3) {
-        if ((s1p1 > s1p2 ? 1 : 2) === (s2p1 > s2p2 ? 1 : 2)) { setErr('Sets not split — no super tiebreak needed.'); return }
-        if (!vSTB(s3p1, s3p2)) { setErr('Super tiebreak: first to 10, win by 2.'); return }
+        if ((a1>b1?1:2)===(a2>b2?1:2)) { setErr('Sets not split — no super tiebreak needed.'); return }
+        if (!vSTB(a3,b3)) { setErr('Super tiebreak: first to 10, win by 2.'); return }
       }
-      const p1s = [s1p1, s2p1], p2s = [s1p2, s2p2]
-      if (has3) { p1s.push(s3p1); p2s.push(s3p2) }
-      builtScores = { p1sets: p1s, p2sets: p2s, tb1: scores.tb1 || {}, tb2: scores.tb2 || {} }
+      const p1s=[a1,a2], p2s=[b1,b2]
+      if (has3) { p1s.push(a3); p2s.push(b3) }
+      const tb1={}, tb2={}
+      if (showTB0&&tb1_0!=='') tb1[0]=parseInt(tb1_0)
+      if (showTB0&&tb2_0!=='') tb2[0]=parseInt(tb2_0)
+      if (showTB1&&tb1_1!=='') tb1[1]=parseInt(tb1_1)
+      if (showTB1&&tb2_1!=='') tb2[1]=parseInt(tb2_1)
+      builtScores = { p1sets:p1s, p2sets:p2s, tb1, tb2 }
     }
-    onSaveScores(matchId, builtScores, isProset)
-    if (winnerSeed !== undefined) onAdvance(matchId, winnerSeed)
+    onSaveScores(localId, builtScores, isProset||isDoubles)
+    if (winnerSeed !== undefined) onAdvance(localId, winnerSeed)
     onClose()
   }
 
-  const inp = (style) => ({ ...style, border: '1px solid #ddd', borderRadius: 6, padding: '5px 4px', textAlign: 'center', background: 'white', fontSize: 15, width: 50 })
-  const tbInp = (style) => ({ ...style, border: '1px solid #ddd', borderRadius: 6, padding: 4, textAlign: 'center', background: 'white', fontSize: 13, width: 42 })
+  const inp = { width: 52, fontSize: 15, textAlign: 'center', border: '1px solid #ddd', borderRadius: 6, padding: '5px 4px', background: 'white', color: '#1a1a1a', fontFamily: 'inherit' }
+  const tbInp = { width: 44, fontSize: 13, textAlign: 'center', border: '1px solid #ddd', borderRadius: 6, padding: 4, background: 'white', color: '#888', fontFamily: 'inherit' }
+  const num = getMatchNum(flight.flightIdx, localId)
 
   return (
     <div style={S.modalBg} onClick={onClose}>
       <div style={S.modal} onClick={e => e.stopPropagation()}>
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Match {matchId} — {FLIGHT_NAMES[flightIdx]}</h3>
-        <p style={{ fontSize: 12, color: '#888', marginBottom: 16 }}>
-          ({p1?.seed}) {p1?.name}{!isDoubles ? ` · ${p1?.school}` : ''} vs ({p2?.seed}) {p2?.name}{!isDoubles ? ` · ${p2?.school}` : ''}
-        </p>
+        <h3 style={{ fontSize: 17, fontWeight: 700, marginBottom: 4, color: '#1a1a1a' }}>Match {num} — {FLIGHT_NAMES[flight.flightIdx]}</h3>
+        <p style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>({p1?.seed}) {p1?.name}{!isDoubles ? ` · ${p1?.school}` : ''} vs ({p2?.seed}) {p2?.name}{!isDoubles ? ` · ${p2?.school}` : ''}</p>
 
         {!isDoubles ? (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, fontSize: 13, color: '#666', cursor: 'pointer' }}>
             <input type="checkbox" checked={isProset} onChange={e => setIsProset(e.target.checked)} />
             Proset (8 games, win by 2)
           </label>
-        ) : (
-          <p style={{ fontSize: 12, color: '#888', marginBottom: 14 }}>Doubles matches are 8-game prosets.</p>
-        )}
+        ) : <p style={{ fontSize: 12, color: '#aaa', marginBottom: 14 }}>Doubles matches are 8-game prosets.</p>}
 
         {(isProset || isDoubles) ? (
           <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 8 }}>
-            <thead><tr>
-              <th style={{ fontSize: 11, color: '#888', textAlign: 'left', padding: '4px 6px' }}>{isDoubles ? 'Team' : 'Player'}</th>
-              <th style={{ fontSize: 11, color: '#888', padding: '4px 6px' }}>Games</th>
-            </tr></thead>
+            <thead><tr><th style={{ fontSize: 11, color: '#aaa', textAlign: 'left', padding: '4px 6px' }}>{isDoubles?'Team':'Player'}</th><th style={{ fontSize: 11, color: '#aaa', padding: '4px 6px' }}>Games</th></tr></thead>
             <tbody>
-              {[p1, p2].map((p, i) => (
-                <tr key={i}>
-                  <td style={{ fontSize: 12, padding: '4px 6px' }}>
-                    <span style={{ fontSize: 10, color: '#888', marginRight: 4 }}>({p?.seed})</span>{p?.name}
-                    {!isDoubles && <span style={{ fontSize: 10, color: '#aaa', display: 'block' }}>{p?.school}</span>}
-                  </td>
-                  <td style={{ padding: '4px 6px' }}>
-                    <input type="number" min={0} max={99} style={inp({})}
-                      value={i === 0 ? psScores.v1 : psScores.v2}
-                      onChange={e => setPsScores(prev => ({ ...prev, [i === 0 ? 'v1' : 'v2']: e.target.value }))} />
-                  </td>
-                </tr>
+              {[p1,p2].map((p,i) => (
+                <tr key={i}><td style={{ fontSize: 12, padding: '5px 6px', color: '#1a1a1a' }}><span style={{ fontSize:10,color:'#aaa',marginRight:4 }}>({p?.seed})</span>{p?.name}{!isDoubles&&<span style={{fontSize:10,color:'#bbb',display:'block'}}>{p?.school}</span>}</td>
+                <td style={{ padding: '5px 6px' }}><input type="number" min={0} max={99} style={inp} value={i===0?psV1:psV2} onChange={e=>i===0?setPsV1(e.target.value):setPsV2(e.target.value)}/></td></tr>
               ))}
             </tbody>
           </table>
@@ -276,108 +321,66 @@ function ScoreModal({ flight, matchId, flightIdx, isDoubles, onClose, onAdvance,
           <>
             <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 8 }}>
               <thead><tr>
-                <th style={{ fontSize: 11, color: '#888', textAlign: 'left', padding: '4px 6px' }}>Player</th>
-                <th style={{ fontSize: 11, color: '#888', padding: '4px 6px' }}>Set 1</th>
-                <th style={{ fontSize: 10, color: '#aaa', padding: '4px 4px' }}>TB</th>
-                <th style={{ fontSize: 11, color: '#888', padding: '4px 6px' }}>Set 2</th>
-                <th style={{ fontSize: 10, color: '#aaa', padding: '4px 4px' }}>TB</th>
-                <th style={{ fontSize: 11, color: '#888', padding: '4px 6px', textAlign: 'center' }}>Set 3<br /><span style={{ fontSize: 9, color: '#aaa' }}>super TB</span></th>
+                <th style={{ fontSize:11,color:'#aaa',textAlign:'left',padding:'4px 6px' }}>Player</th>
+                <th style={{ fontSize:11,color:'#aaa',padding:'4px 6px' }}>Set 1</th>
+                <th style={{ fontSize:10,color:'#ccc',padding:'4px 4px' }}>TB</th>
+                <th style={{ fontSize:11,color:'#aaa',padding:'4px 6px' }}>Set 2</th>
+                <th style={{ fontSize:10,color:'#ccc',padding:'4px 4px' }}>TB</th>
+                <th style={{ fontSize:11,color:'#aaa',padding:'4px 6px',textAlign:'center' }}>Set 3<br/><span style={{fontSize:9,color:'#ccc'}}>super TB</span></th>
               </tr></thead>
               <tbody>
-                {[p1, p2].map((p, pi) => (
+                {[p1,p2].map((p,pi) => (
                   <tr key={pi}>
-                    <td style={{ fontSize: 12, padding: '4px 6px' }}>
-                      <span style={{ fontSize: 10, color: '#888', marginRight: 4 }}>({p?.seed})</span>{p?.name}
-                      <span style={{ fontSize: 10, color: '#aaa', display: 'block' }}>{p?.school}</span>
-                    </td>
-                    {[0, 1].map(si => (
-                      <>
-                        <td key={`s${si}`} style={{ padding: '4px 4px' }}>
-                          <input type="number" min={0} max={7} style={inp({})}
-                            value={pi === 0 ? scores.p1sets[si] : scores.p2sets[si]}
-                            onChange={e => {
-                              const val = e.target.value
-                              setScores(prev => {
-                                const next = JSON.parse(JSON.stringify(prev))
-                                if (pi === 0) next.p1sets[si] = val; else next.p2sets[si] = val
-                                return next
-                              })
-                            }} />
-                        </td>
-                        <td key={`tb${si}`} style={{ padding: '4px 2px' }}>
-                          {showTB(si) && (
-                            <input type="number" min={0} max={99} style={tbInp({})}
-                              placeholder="–"
-                              value={pi === 0 ? (scores.tb1?.[si] ?? '') : (scores.tb2?.[si] ?? '')}
-                              onChange={e => {
-                                const val = e.target.value
-                                setScores(prev => {
-                                  const next = JSON.parse(JSON.stringify(prev))
-                                  if (pi === 0) { next.tb1 = next.tb1 || {}; next.tb1[si] = val }
-                                  else { next.tb2 = next.tb2 || {}; next.tb2[si] = val }
-                                  return next
-                                })
-                              }} />
-                          )}
-                        </td>
-                      </>
-                    ))}
-                    <td style={{ padding: '4px 4px' }}>
-                      <input type="number" min={0} max={99} style={inp({})}
-                        value={pi === 0 ? scores.s3p1 : scores.s3p2}
-                        onChange={e => setScores(prev => ({ ...prev, [pi === 0 ? 's3p1' : 's3p2']: e.target.value }))} />
-                    </td>
+                    <td style={{ fontSize:12,padding:'5px 6px',color:'#1a1a1a' }}><span style={{fontSize:10,color:'#aaa',marginRight:4}}>({p?.seed})</span>{p?.name}<span style={{fontSize:10,color:'#bbb',display:'block'}}>{p?.school}</span></td>
+                    <td style={{ padding:'4px 4px' }}><input type="number" min={0} max={7} style={inp} value={pi===0?s1p1:s1p2} onChange={e=>pi===0?setS1p1(e.target.value):setS1p2(e.target.value)}/></td>
+                    <td style={{ padding:'4px 2px' }}>{showTB0&&<input type="number" min={0} max={99} style={tbInp} placeholder="–" value={pi===0?tb1_0:tb2_0} onChange={e=>pi===0?setTb1_0(e.target.value):setTb2_0(e.target.value)}/>}</td>
+                    <td style={{ padding:'4px 4px' }}><input type="number" min={0} max={7} style={inp} value={pi===0?s2p1:s2p2} onChange={e=>pi===0?setS2p1(e.target.value):setS2p2(e.target.value)}/></td>
+                    <td style={{ padding:'4px 2px' }}>{showTB1&&<input type="number" min={0} max={99} style={tbInp} placeholder="–" value={pi===0?tb1_1:tb2_1} onChange={e=>pi===0?setTb1_1(e.target.value):setTb2_1(e.target.value)}/>}</td>
+                    <td style={{ padding:'4px 4px' }}><input type="number" min={0} max={99} style={inp} value={pi===0?s3p1:s3p2} onChange={e=>pi===0?setS3p1(e.target.value):setS3p2(e.target.value)}/></td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            <p style={{ fontSize: 10, color: '#aaa', marginBottom: 8 }}>TB columns appear on a 7–6 set. Enter the loser's tiebreak score. Set 3 is a super tiebreak (first to 10, win by 2).</p>
+            <p style={{ fontSize:10,color:'#bbb',marginBottom:8 }}>TB columns appear on a 7–6 set. Enter the loser's tiebreak score. Set 3 is a super tiebreak (first to 10, win by 2).</p>
           </>
         )}
 
-        {err && <p style={{ fontSize: 11, color: '#c0392b', marginBottom: 12 }}>{err}</p>}
-
-        <hr style={{ border: 'none', borderTop: '1px solid #eee', margin: '12px 0' }} />
-        <p style={{ fontSize: 13, fontWeight: 600, color: '#888', marginBottom: 8 }}>Confirm winner</p>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-          {[p1, p2].map((p, idx) => (
-            <button key={idx} style={S.winBtn}
-              onClick={() => buildAndSave(idx === 0 ? m.p1 : m.p2)}>
-              <div style={{ fontWeight: 600 }}>{p?.name}</div>
-              {!isDoubles && <div style={{ fontSize: 11, color: '#888' }}>{p?.school}</div>}
+        {err && <p style={{ fontSize:11,color:'#c0392b',marginBottom:12 }}>{err}</p>}
+        <hr style={{ border:'none',borderTop:'1px solid #f0ebe5',margin:'14px 0' }}/>
+        <p style={{ fontSize:13,fontWeight:600,color:'#aaa',marginBottom:8 }}>Confirm winner</p>
+        <div style={{ display:'flex',gap:8,marginBottom:16,flexWrap:'wrap' }}>
+          {[p1,p2].map((p,idx)=>(
+            <button key={idx} style={{ flex:1,minWidth:130,padding:'10px 8px',fontSize:13,cursor:'pointer',border:'1px solid #ddd',borderRadius:8,background:'#fafafa',color:'#333',textAlign:'center',lineHeight:1.5,fontFamily:'inherit' }}
+              onClick={()=>buildAndSave(idx===0?m.p1:m.p2)}>
+              <div style={{ fontWeight:600 }}>{p?.name}</div>
+              {!isDoubles&&<div style={{ fontSize:11,color:'#aaa' }}>{p?.school}</div>}
             </button>
           ))}
         </div>
-
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button style={{ fontSize: 13, padding: '6px 16px', cursor: 'pointer', borderRadius: 8, border: '1px solid #ccc', background: 'transparent' }}
-            onClick={() => { buildAndSave(); }}>Save scores only</button>
-          <button style={{ fontSize: 13, padding: '6px 16px', cursor: 'pointer', borderRadius: 8, border: '1px solid #ccc', background: 'transparent' }}
-            onClick={onClose}>Cancel</button>
+        <div style={{ display:'flex',gap:8,justifyContent:'flex-end' }}>
+          <button style={{ fontSize:13,padding:'7px 16px',cursor:'pointer',borderRadius:8,border:'1px solid #ddd',background:'transparent',fontFamily:'inherit' }} onClick={()=>buildAndSave()}>Save scores only</button>
+          <button style={{ fontSize:13,padding:'7px 16px',cursor:'pointer',borderRadius:8,border:'1px solid #ddd',background:'transparent',fontFamily:'inherit' }} onClick={onClose}>Cancel</button>
         </div>
       </div>
     </div>
   )
 }
 
-// ── Edit Warning Modal ─────────────────────────────────────────────────────────
-function EditWarning({ flight, matchId, onClose, onConfirm }) {
-  const affected = collectDownstream(matchId).filter(id => flight.matches[id]?.winner)
+// ── Edit Warning ──────────────────────────────────────────────────────────────
+function EditWarning({ flight, localId, onClose, onConfirm }) {
+  const affected = collectDownstream(localId).filter(id => flight.matches[id]?.winner)
+  const num = getMatchNum(flight.flightIdx, localId)
   return (
     <div style={S.modalBg} onClick={onClose}>
-      <div style={S.modal} onClick={e => e.stopPropagation()}>
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Edit Match {matchId}</h3>
-        {affected.length > 0 ? (
-          <div style={S.warnBox}>
-            <strong>Warning:</strong> Editing this match will clear {affected.map(id => `Match ${id}`).join(', ')}. Those results will need to be re-entered.
-          </div>
-        ) : (
-          <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>No downstream matches played yet. Safe to re-enter.</p>
-        )}
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button style={{ fontSize: 13, padding: '6px 16px', cursor: 'pointer', borderRadius: 8, border: '1px solid #ccc', background: 'transparent' }} onClick={onClose}>Cancel</button>
-          <button style={{ fontSize: 13, padding: '6px 16px', cursor: 'pointer', borderRadius: 8, border: '1px solid #D85A30', color: '#D85A30', background: 'transparent' }} onClick={onConfirm}>
-            {affected.length > 0 ? 'Clear & re-enter' : 'Re-enter result'}
+      <div style={S.modal} onClick={e=>e.stopPropagation()}>
+        <h3 style={{ fontSize:17,fontWeight:700,marginBottom:12,color:'#1a1a1a' }}>Edit Match {num}</h3>
+        {affected.length>0 ? (
+          <div style={S.warnBox}><strong>Warning:</strong> Editing this match will clear {affected.map(id=>`Match ${getMatchNum(flight.flightIdx,id)}`).join(', ')}. Those results will need to be re-entered.</div>
+        ) : <p style={{ fontSize:13,color:'#aaa',marginBottom:16 }}>No downstream matches played yet. Safe to re-enter.</p>}
+        <div style={{ display:'flex',gap:8,justifyContent:'flex-end' }}>
+          <button style={{ fontSize:13,padding:'7px 16px',cursor:'pointer',borderRadius:8,border:'1px solid #ddd',background:'transparent',fontFamily:'inherit' }} onClick={onClose}>Cancel</button>
+          <button style={{ fontSize:13,padding:'7px 16px',cursor:'pointer',borderRadius:8,border:'1px solid #D85A30',color:'#D85A30',background:'transparent',fontFamily:'inherit' }} onClick={onConfirm}>
+            {affected.length>0?'Clear & re-enter':'Re-enter result'}
           </button>
         </div>
       </div>
@@ -385,226 +388,219 @@ function EditWarning({ flight, matchId, onClose, onConfirm }) {
   )
 }
 
-// ── Flight View ────────────────────────────────────────────────────────────────
-function FlightView({ flight, flightIdx, isAdmin, onUpdate }) {
-  const [modal, setModal] = useState(null) // { type: 'score'|'edit', matchId }
-  const isDoubles = flightIdx === 3
+// ── Flight View ───────────────────────────────────────────────────────────────
+function FlightView({ flight, isAdmin, onUpdate, onOOPUpdate }) {
+  const [modal, setModal] = useState(null)
+  const isDoubles = flight.isDoubles
 
-  function handleAdvance(matchId, winnerSeed) {
+  function handleAdvance(localId, winnerSeed) {
     const next = JSON.parse(JSON.stringify(flight))
-    const m = next.matches[matchId]
-    const loserSeed = winnerSeed === m.p1 ? m.p2 : m.p1
-    m.winner = winnerSeed; m.loser = loserSeed
-    function placeIn(mid, seed) { const nm = next.matches[mid]; if (!nm.p1) nm.p1 = seed; else nm.p2 = seed }
-    if (matchId === 1) { next.matches[4].p2 = winnerSeed; next.matches[7].p1 = loserSeed }
-    else if (matchId === 2) { placeIn(5, winnerSeed); next.matches[6].p1 = loserSeed }
-    else if (matchId === 3) { placeIn(5, winnerSeed); next.matches[6].p2 = loserSeed }
-    else if (matchId === 4) { next.matches[10].p1 = winnerSeed; next.matches[8].p1 = loserSeed }
-    else if (matchId === 5) { next.matches[10].p2 = winnerSeed; next.matches[7].p2 = loserSeed }
-    else if (matchId === 6) { next.matches[8].p2 = winnerSeed }
-    else if (matchId === 7) { placeIn(9, winnerSeed) }
-    else if (matchId === 8) { placeIn(9, winnerSeed) }
-    next.points = recomputePoints(next)
+    const m = next.matches[localId]
+    const loserSeed = winnerSeed===m.p1?m.p2:m.p1
+    m.winner=winnerSeed; m.loser=loserSeed
+    function place(mid,seed){const nm=next.matches[mid];if(!nm.p1)nm.p1=seed;else nm.p2=seed}
+    if(localId===1){next.matches[4].p2=winnerSeed;next.matches[7].p1=loserSeed}
+    else if(localId===2){place(5,winnerSeed);next.matches[6].p1=loserSeed}
+    else if(localId===3){place(5,winnerSeed);next.matches[6].p2=loserSeed}
+    else if(localId===4){next.matches[10].p1=winnerSeed;next.matches[8].p1=loserSeed}
+    else if(localId===5){next.matches[10].p2=winnerSeed;next.matches[7].p2=loserSeed}
+    else if(localId===6){next.matches[8].p2=winnerSeed}
+    else if(localId===7){place(9,winnerSeed)}
+    else if(localId===8){place(9,winnerSeed)}
+    next.points=recomputePoints(next)
+    onUpdate(next)
+    if(onOOPUpdate) onOOPUpdate()
+  }
+
+  function handleSaveScores(localId, scores, proset) {
+    const next = JSON.parse(JSON.stringify(flight))
+    next.matches[localId].scores=scores; next.matches[localId].proset=proset
     onUpdate(next)
   }
 
-  function handleSaveScores(matchId, scores, proset) {
+  function confirmEdit(localId) {
     const next = JSON.parse(JSON.stringify(flight))
-    next.matches[matchId].scores = scores
-    next.matches[matchId].proset = proset
+    collectDownstream(localId).forEach(id=>{const fs=FIXED[id];next.matches[id]={...next.matches[id],p1:fs.p1,p2:fs.p2,winner:null,loser:null,scores:null}})
+    next.points=recomputePoints(next)
     onUpdate(next)
-  }
-
-  function handleEdit(matchId) {
-    setModal({ type: 'edit', matchId })
-  }
-
-  function confirmEdit(matchId) {
-    const next = JSON.parse(JSON.stringify(flight))
-    collectDownstream(matchId).forEach(id => {
-      const fs = FIXED[id]
-      next.matches[id] = { ...next.matches[id], p1: fs.p1, p2: fs.p2, winner: null, loser: null, scores: null }
-    })
-    next.points = recomputePoints(next)
-    onUpdate(next)
-    setModal({ type: 'score', matchId })
+    setModal({type:'score',localId})
   }
 
   function mkCard(id) {
-    return <MatchCard key={id} flight={flight} matchId={id} isAdmin={isAdmin}
-      onOpen={id => setModal({ type: 'score', matchId: id })}
-      onEdit={handleEdit} />
+    return <MatchCard key={id} flight={flight} localId={id} isAdmin={isAdmin}
+      onOpen={id=>setModal({type:'score',localId:id})} onEdit={id=>setModal({type:'edit',localId:id})}/>
   }
 
-  const pts = flight.points || {}
-  const sortedSeeds = Object.keys(pts).sort((a, b) => pts[b] - pts[a])
+  const pts = flight.points||{}
+  const sortedSeeds = Object.keys(pts).sort((a,b)=>pts[b]-pts[a])
 
   return (
     <div>
-      {isAdmin && <button style={S.resetBtn} onClick={() => {
-        if (confirm('Reset this flight? All results will be cleared.')) {
-          const f = emptyFlight(isDoubles)
-          f.players = flight.players
-          f.isDoubles = isDoubles
-          f.points = recomputePoints(f)
-          onUpdate(f)
-        }
-      }}>Reset flight</button>}
-      {isDoubles && <p style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>All doubles matches are 8-game prosets.</p>}
+      {isAdmin&&<button style={S.resetBtn} onClick={()=>{if(confirm('Reset this flight? All results will be cleared.')){const f=emptyFlight(isDoubles);f.players=flight.players;f.isDoubles=isDoubles;f.flightIdx=flight.flightIdx;f.points=recomputePoints(f);onUpdate(f)}}}>Reset flight</button>}
+      {isDoubles&&<p style={{fontSize:12,color:'#aaa',marginBottom:12}}>All doubles matches are 8-game prosets.</p>}
 
-      <div style={S.section}>
-        <h2 style={S.h2}>Winners bracket</h2>
-        <div style={S.bracketWrap}>
-          <div style={{ ...S.round, gap: 10 }}>
-            <div style={S.roundLabel}>Round 1</div>
-            {[1,2,3].map(id => mkCard(id))}
-          </div>
-          <VConn n={3} />
-          <div style={{ ...S.round, justifyContent: 'space-around', gap: 12, paddingTop: 28 }}>
-            <div style={S.roundLabel}>Semifinals</div>
-            {[4,5].map(id => mkCard(id))}
-          </div>
-          <VConn n={2} />
-          <div style={{ ...S.round, justifyContent: 'center', paddingTop: 28 }}>
-            <div style={S.roundLabel}>Final</div>
-            {mkCard(10)}
-          </div>
-        </div>
+      <div style={{marginBottom:8}}><div style={S.sectionHead}>Winners bracket</div></div>
+      <div style={S.bracketWrap}>
+        <div style={{...S.round,gap:10}}><div style={S.roundLabel}>Round 1</div>{[1,2,3].map(id=>mkCard(id))}</div>
+        <VConn n={3}/>
+        <div style={{...S.round,justifyContent:'space-around',gap:12,paddingTop:28}}><div style={S.roundLabel}>Semifinals</div>{[4,5].map(id=>mkCard(id))}</div>
+        <VConn n={2}/>
+        <div style={{...S.round,justifyContent:'center',paddingTop:28}}><div style={S.roundLabel}>Final</div>{mkCard(10)}</div>
       </div>
 
-      <div style={S.section}>
-        <h2 style={S.h2}>Consolation bracket</h2>
-        <div style={S.bracketWrap}>
-          <div style={{ ...S.round, justifyContent: 'flex-start', gap: 8 }}>
-            <div style={S.roundLabel}>Play-in</div>
-            {mkCard(6)}
-            <div style={{ flex: 1 }} />
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', width: 32, alignSelf: 'stretch' }}>
-            <div style={{ flex: 1, borderRight: '1px solid #ccc', borderBottom: '1px solid #ccc' }} />
-            <div style={{ flex: 3 }} />
-          </div>
-          <div style={{ ...S.round, justifyContent: 'space-between', gap: 12 }}>
-            <div style={S.roundLabel}>Semifinals</div>
-            {mkCard(8)}
-            {mkCard(7)}
-          </div>
-          <VConn n={2} />
-          <div style={{ ...S.round, justifyContent: 'center' }}>
-            <div style={S.roundLabel}>Final</div>
-            {mkCard(9)}
-          </div>
-        </div>
+      <div style={{marginBottom:8}}><div style={S.sectionHead}>Consolation bracket</div></div>
+      <div style={S.bracketWrap}>
+        <div style={{...S.round,justifyContent:'flex-start',gap:8}}><div style={S.roundLabel}>Play-in</div>{mkCard(6)}<div style={{flex:1}}/></div>
+        <div style={{display:'flex',flexDirection:'column',width:32,alignSelf:'stretch'}}><div style={{flex:1,borderRight:'1px solid #e8e0d5',borderBottom:'1px solid #e8e0d5'}}/><div style={{flex:3}}/></div>
+        <div style={{...S.round,justifyContent:'space-between',gap:12}}><div style={S.roundLabel}>Semifinals</div>{mkCard(8)}{mkCard(7)}</div>
+        <VConn n={2}/>
+        <div style={{...S.round,justifyContent:'center'}}><div style={S.roundLabel}>Final</div>{mkCard(9)}</div>
       </div>
 
-      <div style={S.section}>
-        <h2 style={S.h2}>Points</h2>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {sortedSeeds.map(s => {
-            const p = flight.players[s]
-            if (!p) return null
-            return (
-              <div key={s} style={{ background: 'white', borderRadius: 8, border: '1px solid #eee', padding: '8px 14px', minWidth: 120 }}>
-                <div style={{ fontSize: 11, color: '#888', marginBottom: 1 }}>({p.seed}) {p.name}</div>
-                {!isDoubles && <div style={{ fontSize: 10, color: '#aaa', marginBottom: 3 }}>{p.school}</div>}
-                <div style={{ fontSize: 18, fontWeight: 700 }}>{(pts[s] || 0).toFixed(1)} pts</div>
-              </div>
-            )
-          })}
-        </div>
+      <div style={S.sectionHead}>Points</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:24}}>
+        {sortedSeeds.map(s=>{const p=flight.players[s];if(!p)return null;return(
+          <div key={s} style={S.ptsCard}>
+            <div style={S.ptsName}>({p.seed}) {p.name}</div>
+            {!isDoubles&&<div style={S.ptsSchool}>{p.school}</div>}
+            <div style={S.ptsVal}>{(pts[s]||0).toFixed(1)}</div>
+          </div>
+        )})}
       </div>
 
-      {modal?.type === 'score' && (
-        <ScoreModal flight={flight} matchId={modal.matchId} flightIdx={flightIdx}
-          isDoubles={isDoubles} onClose={() => setModal(null)}
-          onAdvance={handleAdvance} onSaveScores={handleSaveScores} />
-      )}
-      {modal?.type === 'edit' && (
-        <EditWarning flight={flight} matchId={modal.matchId}
-          onClose={() => setModal(null)}
-          onConfirm={() => confirmEdit(modal.matchId)} />
-      )}
+      {modal?.type==='score'&&<ScoreModal flight={flight} localId={modal.localId} onClose={()=>setModal(null)} onAdvance={handleAdvance} onSaveScores={handleSaveScores}/>}
+      {modal?.type==='edit'&&<EditWarning flight={flight} localId={modal.localId} onClose={()=>setModal(null)} onConfirm={()=>confirmEdit(modal.localId)}/>}
+    </div>
+  )
+}
+
+// ── Order of Play ─────────────────────────────────────────────────────────────
+function OrderOfPlay({ flights, inProgress, setInProgress }) {
+  if (!flights.some(f=>f)) return <p style={{fontSize:13,color:'#bbb',fontStyle:'italic',marginTop:16}}>Generate brackets in Setup to see the order of play.</p>
+
+  function getStatus(f,lid) {
+    const fl=flights[f]
+    if(!fl)return'waiting'
+    const m=fl.matches[lid]
+    if(m?.winner)return'complete'
+    if(inProgress.has(`${f}-${lid}`))return'inprogress'
+    if(m?.p1&&m?.p2&&!m?.winner)return'ready'
+    return'waiting'
+  }
+  function getPlayers(f,lid) {
+    const fl=flights[f];if(!fl)return'—'
+    const m=fl.matches[lid],p=fl.players
+    return`${m?.p1?p[m.p1]?.name:'TBD'} vs ${m?.p2?p[m.p2]?.name:'TBD'}`
+  }
+  function getScore(f,lid) {
+    const fl=flights[f];if(!fl)return''
+    const m=fl.matches[lid];if(!m?.winner||!m?.scores)return''
+    return fmtScore(m.scores,m.proset,m.winner===m.p1?1:2)
+  }
+  function toggleIP(f,lid) {
+    const key=`${f}-${lid}`;const next=new Set(inProgress)
+    if(next.has(key))next.delete(key);else next.add(key)
+    setInProgress(next)
+  }
+
+  function OOPRow({f,lid,isDoubles}) {
+    const status=getStatus(f,lid)
+    const rowStyle=status==='inprogress'?S.oopMatchIP:status==='complete'?S.oopMatchDone:status==='waiting'?S.oopMatchWait:S.oopMatch
+    const numStyle=isDoubles?S.oopNumD:S.oopNum
+    const flightStyle=isDoubles?S.oopFlightD:S.oopFlight
+    const statusStyle=status==='complete'?S.oopStatusDone:status==='inprogress'?S.oopStatusIP:status==='ready'?S.oopStatusReady:S.oopStatusWait
+    const statusLabel=status==='complete'?'✓ Done':status==='inprogress'?'● On court':status==='ready'?'Start':'Waiting'
+    return(
+      <div style={rowStyle}>
+        <div style={numStyle}>{getMatchNum(f,lid)}</div>
+        <div style={flightStyle}>{FLIGHT_NAMES[f]}</div>
+        <div style={S.oopPlayers}>{getPlayers(f,lid)}</div>
+        <div style={S.oopScore}>{getScore(f,lid)}</div>
+        <button style={statusStyle} onClick={()=>(status==='ready'||status==='inprogress')&&toggleIP(f,lid)}>{statusLabel}</button>
+      </div>
+    )
+  }
+
+  return(
+    <div>
+      <div style={{...S.sectionHead,marginBottom:14,marginTop:4}}>Singles — Matches 1–40</div>
+      {SINGLES_ROUNDS.map(round=>(
+        <div key={round.label} style={{marginBottom:20}}>
+          <div style={S.oopRoundHeader}><span>{round.label}</span><span style={S.oopRoundSub}>{round.sub}</span></div>
+          {round.matches.map(([f,lid])=><OOPRow key={`${f}-${lid}`} f={f} lid={lid} isDoubles={false}/>)}
+        </div>
+      ))}
+      <div style={{...S.sectionHeadBlue,marginBottom:14,marginTop:8}}>Doubles — Matches D1–D10</div>
+      {DOUBLES_ROUNDS.map(round=>(
+        <div key={round.label} style={{marginBottom:20}}>
+          <div style={S.oopDoublesHeader}><span>{round.label}</span></div>
+          {round.matches.map(([f,lid])=><OOPRow key={`${f}-${lid}`} f={f} lid={lid} isDoubles={true}/>)}
+        </div>
+      ))}
     </div>
   )
 }
 
 // ── Setup View ────────────────────────────────────────────────────────────────
 function SetupView({ onGenerate }) {
-  const [entries, setEntries] = useState(() => {
-    const e = {}
-    for (let f = 0; f < 4; f++) {
-      e[f] = {}
-      for (let s = 1; s <= 7; s++) e[f][s] = { name: '', school: '' }
-    }
+  const [entries, setEntries] = useState(()=>{
+    const e={}
+    for(let f=0;f<5;f++){e[f]={};for(let s=1;s<=7;s++)e[f][s]={name:'',school:''}}
     return e
   })
   const [err, setErr] = useState('')
 
-  function getDuplicates(f) {
-    const counts = {}
-    for (let s = 1; s <= 7; s++) {
-      const sch = entries[f][s].school
-      if (sch) counts[sch] = (counts[sch] || 0) + 1
-    }
-    return counts
-  }
+  function getDups(f){const c={};for(let s=1;s<=7;s++){const sc=entries[f][s].school;if(sc)c[sc]=(c[sc]||0)+1};return c}
 
-  function generate() {
+  function generate(){
     setErr('')
-    const flights = []
-    for (let f = 0; f < 4; f++) {
-      const isDoubles = f === 3
-      const usedSchools = new Set()
-      const players = {}
-      for (let s = 1; s <= 7; s++) {
-        const { name, school } = entries[f][s]
-        if (!school) { setErr(`Assign all schools in ${FLIGHT_NAMES[f]}.`); return }
-        if (!isDoubles && !name.trim()) { setErr(`Enter all player names in ${FLIGHT_NAMES[f]}.`); return }
-        if (usedSchools.has(school)) { setErr(`${school} appears more than once in ${FLIGHT_NAMES[f]}.`); return }
-        usedSchools.add(school)
-        players[s] = { seed: s, name: isDoubles ? school : name.trim(), school }
+    const fls=[]
+    for(let f=0;f<5;f++){
+      const isDoubles=f===4,used=new Set(),players={}
+      for(let s=1;s<=7;s++){
+        const{name,school}=entries[f][s]
+        if(!school){setErr(`Assign all schools in ${FLIGHT_NAMES[f]}.`);return}
+        if(!isDoubles&&!name.trim()){setErr(`Enter all player names in ${FLIGHT_NAMES[f]}.`);return}
+        if(used.has(school)){setErr(`${school} appears more than once in ${FLIGHT_NAMES[f]}.`);return}
+        used.add(school)
+        players[s]={seed:s,name:isDoubles?school:name.trim(),school}
       }
-      const flight = emptyFlight(isDoubles)
-      flight.players = players
-      flight.isDoubles = isDoubles
-      flight.points = recomputePoints(flight)
-      flights.push(flight)
+      const fl=emptyFlight(isDoubles)
+      fl.players=players;fl.isDoubles=isDoubles;fl.flightIdx=f;fl.points=recomputePoints(fl)
+      fls.push(fl)
     }
-    onGenerate(flights)
+    onGenerate(fls)
   }
 
-  return (
+  function setEntry(f,s,field,val){setEntries(prev=>({...prev,[f]:{...prev[f],[s]:{...prev[f][s],[field]:val}}}))}
+
+  return(
     <div>
-      <h2 style={S.h2}>Assign seeds for each flight</h2>
-      <p style={{ fontSize: 13, color: '#888', marginBottom: 20 }}>Singles: enter each player's name and school. Doubles: select school only.</p>
+      <div style={S.pageTitle}>Assign seeds for each flight</div>
+      <div style={S.pageSub}>Singles: enter each player's name and school. Doubles: select school only.</div>
       <div style={S.setupGrid}>
-        {[0,1,2,3].map(f => {
-          const isDoubles = f === 3
-          const dups = getDuplicates(f)
-          return (
+        {[0,1,2,3,4].map(f=>{
+          const isDoubles=f===4,dups=getDups(f)
+          const badge=isDoubles?'D1–D10':`${f*10+1}–${f*10+10}`
+          return(
             <div key={f} style={S.setupFlight}>
-              <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>{FLIGHT_NAMES[f]}</h3>
-              {[1,2,3,4,5,6,7].map(s => {
-                const { name, school } = entries[f][s]
-                const isDup = school && dups[school] > 1
-                return (
+              <div style={S.flightTitleRow}>
+                <span style={S.flightTitleText}>{FLIGHT_NAMES[f]}</span>
+                <span style={S.flightBadge}>{badge}</span>
+              </div>
+              {[1,2,3,4,5,6,7].map(s=>{
+                const{name,school}=entries[f][s],isDup=school&&dups[school]>1
+                return(
                   <div key={s} style={S.seedBlock}>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: '#888', marginBottom: 8 }}>Seed {s}</div>
-                    {!isDoubles && (
-                      <>
-                        <div style={S.fieldLabel}>Player name</div>
-                        <input type="text" style={S.textInput} placeholder="e.g. Smith, John"
-                          value={name}
-                          onChange={e => setEntries(prev => ({ ...prev, [f]: { ...prev[f], [s]: { ...prev[f][s], name: e.target.value } } }))} />
-                      </>
-                    )}
+                    <div style={S.seedHeader}>Seed {s}</div>
+                    {!isDoubles&&<><div style={S.fieldLabel}>Player name</div>
+                    <input type="text" style={S.textInput} placeholder="e.g. Smith, John" value={name} onChange={e=>setEntry(f,s,'name',e.target.value)}/></>}
                     <div style={S.fieldLabel}>School</div>
-                    <select style={isDup ? S.selectDup : S.select} value={school}
-                      onChange={e => setEntries(prev => ({ ...prev, [f]: { ...prev[f], [s]: { ...prev[f][s], school: e.target.value } } }))}>
+                    <select style={isDup?S.selectDup:S.select} value={school} onChange={e=>setEntry(f,s,'school',e.target.value)}>
                       <option value="">— select school —</option>
-                      {SCHOOLS.map(sch => <option key={sch} value={sch}>{sch}</option>)}
+                      {SCHOOLS.map(sc=><option key={sc} value={sc}>{sc}</option>)}
                     </select>
-                    {isDup && <div style={S.dupMsg}>Already selected in this flight</div>}
+                    {isDup&&<div style={S.dupMsg}>Already selected in this flight</div>}
                   </div>
                 )
               })}
@@ -613,42 +609,36 @@ function SetupView({ onGenerate }) {
         })}
       </div>
       <button style={S.genBtn} onClick={generate}>Generate brackets →</button>
-      {err && <p style={S.errMsg}>{err}</p>}
+      {err&&<p style={{fontSize:12,color:'#c0392b',marginTop:10}}>{err}</p>}
     </div>
   )
 }
 
-// ── Leaderboard ────────────────────────────────────────────────────────────────
+// ── Leaderboard ───────────────────────────────────────────────────────────────
 function Leaderboard({ flights }) {
-  const totals = {}, breakdown = {}
-  SCHOOLS.forEach(sch => { totals[sch] = 0; breakdown[sch] = {} })
-  flights.forEach((flight, fi) => {
-    if (!flight) return
-    const pts = flight.points || {}
-    for (let s = 1; s <= 7; s++) {
-      const p = flight.players[s]
-      if (!p?.school) continue
-      totals[p.school] = (totals[p.school] || 0) + (pts[s] || 0)
-      breakdown[p.school][FLIGHT_NAMES[fi]] = pts[s] || 0
-    }
+  const totals={},breakdown={}
+  SCHOOLS.forEach(sch=>{totals[sch]=0;breakdown[sch]={}})
+  flights.forEach((fl,fi)=>{
+    if(!fl)return
+    const pts=fl.points||{}
+    for(let s=1;s<=7;s++){const p=fl.players[s];if(!p?.school)continue;totals[p.school]=(totals[p.school]||0)+(pts[s]||0);breakdown[p.school][FLIGHT_NAMES[fi]]=pts[s]||0}
   })
-  const sorted = SCHOOLS.slice().sort((a, b) => totals[b] - totals[a])
-  const rankColors = ['#BA7517', '#888780', '#854F0B']
+  const sorted=SCHOOLS.slice().sort((a,b)=>totals[b]-totals[a])
+  const rankColors=['#B8860B','#888780','#854F0B']
+  const borderColors=['#B8860B','#888780','#854F0B']
 
-  return (
+  return(
     <div>
-      <h2 style={S.h2}>Team standings</h2>
-      <p style={{ fontSize: 13, color: '#888', marginBottom: 20 }}>Total points across all 4 flights.</p>
-      {sorted.map((sch, i) => {
-        const bd = Object.entries(breakdown[sch] || {}).map(([fn, pts]) => `${fn}: ${pts.toFixed(1)}`).join(' · ') || 'No results yet'
-        return (
-          <div key={sch} style={S.lbRow}>
-            <div style={{ ...S.lbRank, color: rankColors[i] || '#ccc' }}>{i + 1}</div>
-            <div style={{ flex: 1 }}>
-              <div style={S.lbName}>{sch}</div>
-              <div style={S.lbBd}>{bd}</div>
-            </div>
-            <div style={S.lbTotal}>{totals[sch].toFixed(1)}</div>
+      <div style={S.pageTitle}>Team standings</div>
+      <div style={S.pageSub}>Total points across all 5 flights.</div>
+      {sorted.map((sch,i)=>{
+        const bd=Object.entries(breakdown[sch]||{}).map(([fn,pts])=>`${fn}: ${pts.toFixed(1)}`).join(' · ')||'No results yet'
+        const cardStyle={...S.lbCard,borderLeft:i<3?`4px solid ${borderColors[i]}`:undefined}
+        return(
+          <div key={sch} style={cardStyle}>
+            <div style={{...S.lbRank,color:i<3?rankColors[i]:'#ddd'}}>{i+1}</div>
+            <div style={{flex:1}}><div style={S.lbName}>{sch}</div><div style={S.lbBd}>{bd}</div></div>
+            <div style={S.lbPts}>{totals[sch].toFixed(1)}</div>
           </div>
         )
       })}
@@ -656,140 +646,137 @@ function Leaderboard({ flights }) {
   )
 }
 
-// ── Admin Login ────────────────────────────────────────────────────────────────
+// ── Admin Login ───────────────────────────────────────────────────────────────
 function AdminLogin({ onLogin }) {
-  const [pw, setPw] = useState('')
-  const [err, setErr] = useState('')
-  return (
+  const [pw,setPw]=useState(''),err=useRef('')
+  const [,forceUpdate]=useState(0)
+  function attempt(){if(pw===ADMIN_PASSWORD){onLogin()}else{err.current='Incorrect password.';forceUpdate(n=>n+1)}}
+  return(
     <div style={S.lockBox}>
-      <div style={{ fontSize: 32, marginBottom: 12 }}>🎾</div>
-      <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Admin access</h2>
-      <p style={{ fontSize: 13, color: '#888', marginBottom: 20 }}>Enter the coach password to enter scores.</p>
-      <input type="password" placeholder="Password" style={{ ...S.textInput, marginBottom: 12, textAlign: 'center' }}
-        value={pw} onChange={e => setPw(e.target.value)}
-        onKeyDown={e => e.key === 'Enter' && (pw === ADMIN_PASSWORD ? onLogin() : setErr('Incorrect password.'))} />
-      <button style={{ ...S.genBtn, width: '100%' }}
-        onClick={() => pw === ADMIN_PASSWORD ? onLogin() : setErr('Incorrect password.')}>
-        Sign in
-      </button>
-      {err && <p style={S.errMsg}>{err}</p>}
+      <MapleLeaf size={56}/>
+      <h2 style={{fontSize:20,fontWeight:700,margin:'12px 0 4px',color:'#1a1a1a'}}>Coach login</h2>
+      <p style={{fontSize:13,color:'#aaa',marginBottom:20}}>Enter the password to enter scores.</p>
+      <input type="password" placeholder="Password" style={{...S.textInput,marginBottom:12,textAlign:'center'}}
+        value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&attempt()}/>
+      <button style={{...S.genBtn,width:'100%'}} onClick={attempt}>Sign in</button>
+      {err.current&&<p style={{fontSize:12,color:'#c0392b',marginTop:10}}>{err.current}</p>}
     </div>
   )
 }
 
-// ── Main App ───────────────────────────────────────────────────────────────────
+// ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState('setup')
-  const [flights, setFlights] = useState([null, null, null, null])
-  const [generated, setGenerated] = useState(false)
-  const [isAdmin, setIsAdmin] = useState(false)
-  const [showLogin, setShowLogin] = useState(false)
-  const [loading, setLoading] = useState(true)
+  const [tab,setTab]=useState('setup')
+  const [flights,setFlights]=useState([null,null,null,null,null])
+  const [generated,setGenerated]=useState(false)
+  const [isAdmin,setIsAdmin]=useState(false)
+  const [showLogin,setShowLogin]=useState(false)
+  const [loading,setLoading]=useState(true)
+  const [inProgress,setInProgress]=useState(new Set())
 
-  // Load state from Supabase on mount
-  useEffect(() => {
-    async function load() {
-      const { data } = await supabase.from('tournament_state').select('*').eq('id', 1).single()
-      if (data?.state) {
-        const s = data.state
-        setFlights(s.flights || [null, null, null, null])
-        setGenerated(s.generated || false)
-        if (s.generated) setTab('flight0')
+  useEffect(()=>{
+    async function load(){
+      const{data}=await supabase.from('tournament_state').select('*').eq('id',1).single()
+      if(data?.state){
+        const s=data.state
+        // Re-attach flightIdx to each flight
+        const fls=(s.flights||[null,null,null,null,null]).map((fl,i)=>fl?{...fl,flightIdx:i,isDoubles:i===4}:null)
+        setFlights(fls)
+        setGenerated(s.generated||false)
+        if(s.generated)setTab('oop')
       }
       setLoading(false)
     }
     load()
+    const channel=supabase.channel('tournament')
+      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'tournament_state'},payload=>{
+        const s=payload.new.state
+        const fls=(s.flights||[null,null,null,null,null]).map((fl,i)=>fl?{...fl,flightIdx:i,isDoubles:i===4}:null)
+        setFlights(fls)
+        setGenerated(s.generated||false)
+      }).subscribe()
+    return()=>supabase.removeChannel(channel)
+  },[])
 
-    // Real-time subscription
-    const channel = supabase.channel('tournament')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tournament_state' }, payload => {
-        const s = payload.new.state
-        setFlights(s.flights || [null, null, null, null])
-        setGenerated(s.generated || false)
-      })
-      .subscribe()
+  const saveState=useCallback(async(newFlights,newGenerated)=>{
+    await supabase.from('tournament_state').upsert({id:1,state:{flights:newFlights,generated:newGenerated}})
+  },[])
 
-    return () => supabase.removeChannel(channel)
-  }, [])
-
-  // Save state to Supabase
-  const saveState = useCallback(async (newFlights, newGenerated) => {
-    await supabase.from('tournament_state').upsert({ id: 1, state: { flights: newFlights, generated: newGenerated } })
-  }, [])
-
-  function handleGenerate(newFlights) {
-    setFlights(newFlights)
-    setGenerated(true)
-    setTab('flight0')
-    saveState(newFlights, true)
+  function handleGenerate(newFlights){
+    setFlights(newFlights);setGenerated(true);setTab('oop')
+    saveState(newFlights,true)
   }
 
-  function handleFlightUpdate(fi, updatedFlight) {
-    const next = [...flights]
-    next[fi] = updatedFlight
-    setFlights(next)
-    saveState(next, generated)
+  function handleFlightUpdate(fi,updatedFlight){
+    const next=[...flights];next[fi]=updatedFlight;setFlights(next)
+    saveState(next,generated)
   }
 
-  const tabNames = ['setup', 'flight0', 'flight1', 'flight2', 'flight3', 'team']
-  const tabLabels = ['Setup', 'Singles #1', 'Singles #2', 'Singles #3', 'Doubles', 'Team Scores']
+  const TABS=[
+    {id:'setup',label:'Setup'},
+    {id:'oop',label:'Order of Play'},
+    {id:'f0',label:'Singles #1'},
+    {id:'f1',label:'Singles #2'},
+    {id:'f2',label:'Singles #3'},
+    {id:'f3',label:'Singles #4'},
+    {id:'f4',label:'Doubles'},
+    {id:'team',label:'Team Scores'},
+  ]
 
-  if (loading) return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh' }}>
-      <p style={{ color: '#888', fontSize: 16 }}>Loading tournament...</p>
+  if(loading) return(
+    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'60vh'}}>
+      <p style={{color:'#aaa',fontSize:16}}>Loading tournament...</p>
     </div>
   )
 
-  return (
-    <div>
-      {isAdmin && (
+  return(
+    <div style={S.appWrap}>
+      {isAdmin&&(
         <div style={S.adminBar}>
-          <div style={S.adminDot} />
+          <div style={S.adminDot}/>
           <span>Admin mode — scores can be edited</span>
-          <button style={{ marginLeft: 'auto', fontSize: 12, padding: '4px 10px', cursor: 'pointer', border: '1px solid #555', borderRadius: 6, background: 'transparent', color: 'white' }}
-            onClick={() => setIsAdmin(false)}>Sign out</button>
+          <button style={{marginLeft:'auto',fontSize:12,padding:'4px 10px',cursor:'pointer',border:'1px solid #555',borderRadius:6,background:'transparent',color:'white',fontFamily:'inherit'}} onClick={()=>setIsAdmin(false)}>Sign out</button>
         </div>
       )}
-
-      <div style={S.wrap}>
-        <div style={S.header}>
-          <h1 style={S.h1}>MAPL Boys' Tennis Tournament</h1>
-          <p style={S.sub}>Lawrenceville · Peddie · Blair · Mercersburg · Hill · Hun · Pennington</p>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
-          <div style={S.tabs}>
-            {tabNames.map((t, i) => (
-              <button key={t} style={tab === t ? S.tabActive : S.tab}
-                onClick={() => setTab(t)}
-                disabled={!generated && t !== 'setup'}>
-                {tabLabels[i]}
-              </button>
-            ))}
+      <div style={S.header}>
+        <div style={S.headerInner}>
+          <MapleLeaf size={64}/>
+          <div>
+            <div style={S.headerTitle}>MAPL Boys' Tennis</div>
+            <div style={S.headerSub}>Mid-Atlantic Prep League</div>
+            <div style={S.headerSchools}>Lawrenceville · Peddie · Blair · Mercersburg · Hill · Hun · Pennington</div>
           </div>
-          {!isAdmin && (
-            <button style={{ fontSize: 12, padding: '5px 12px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 8, background: 'white', color: '#666' }}
-              onClick={() => setShowLogin(true)}>
-              Coach login
-            </button>
+          {!isAdmin&&(
+            <button style={{marginLeft:'auto',fontSize:12,padding:'7px 14px',cursor:'pointer',border:'1px solid rgba(255,255,255,0.25)',borderRadius:8,background:'transparent',color:'rgba(255,255,255,0.75)',fontFamily:'inherit'}} onClick={()=>setShowLogin(true)}>Coach login</button>
           )}
         </div>
+      </div>
+      <div style={S.copperBar}/>
 
-        {tab === 'setup' && <SetupView onGenerate={handleGenerate} />}
-        {['flight0','flight1','flight2','flight3'].map((t, fi) =>
-          tab === t && flights[fi] ? (
-            <FlightView key={t} flight={flights[fi]} flightIdx={fi} isAdmin={isAdmin}
-              onUpdate={f => handleFlightUpdate(fi, f)} />
-          ) : null
-        )}
-        {tab === 'team' && <Leaderboard flights={flights} />}
+      <div style={S.tabsWrap}>
+        <div style={S.tabsInner}>
+          {TABS.map(t=>(
+            <button key={t.id} style={tab===t.id?S.tabActive:S.tab}
+              onClick={()=>setTab(t.id)}
+              disabled={!generated&&t.id!=='setup'}>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {showLogin && (
-        <div style={S.modalBg} onClick={() => setShowLogin(false)}>
-          <div onClick={e => e.stopPropagation()}>
-            <AdminLogin onLogin={() => { setIsAdmin(true); setShowLogin(false) }} />
-          </div>
+      <div style={S.inner}>
+        {tab==='setup'&&<SetupView onGenerate={handleGenerate}/>}
+        {tab==='oop'&&<div style={{marginTop:8}}><OrderOfPlay flights={flights} inProgress={inProgress} setInProgress={setInProgress}/></div>}
+        {['f0','f1','f2','f3','f4'].map((t,fi)=>
+          tab===t&&flights[fi]?<FlightView key={t} flight={flights[fi]} isAdmin={isAdmin} onUpdate={f=>handleFlightUpdate(fi,f)} onOOPUpdate={()=>setInProgress(new Set(inProgress))}/>:null
+        )}
+        {tab==='team'&&<Leaderboard flights={flights}/>}
+      </div>
+
+      {showLogin&&(
+        <div style={S.modalBg} onClick={()=>setShowLogin(false)}>
+          <div onClick={e=>e.stopPropagation()}><AdminLogin onLogin={()=>{setIsAdmin(true);setShowLogin(false)}}/></div>
         </div>
       )}
     </div>
