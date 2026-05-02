@@ -836,7 +836,7 @@ export default function App() {
         </div>
       )}
 
-      <div style={{...S.header,backgroundImage:rainDay?'linear-gradient(135deg, #1a2a3a 0%, #1a3a5a 60%, #0f2030 100%)':undefined}}>
+      <div style={{...S.header,background:rainDay?'linear-gradient(135deg, #1a2a3a 0%, #1a3a5a 60%, #0f2030 100%)':'linear-gradient(135deg, #1a1a1a 0%, #2d1a0a 60%, #1a0f05 100%)'}}>
         <div style={S.headerInner}>
           <MapleLeaf size={64}/>
           <div>
