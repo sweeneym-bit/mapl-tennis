@@ -2,7 +2,6 @@ export const metadata = {
   title: 'MAPL Boys\' Tennis Tournament',
   description: 'Live brackets and team scores — Mid-Atlantic Prep League',
 }
-
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
