@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -703,12 +703,41 @@ export default function App(){
     return()=>supabase.removeChannel(ch)
   },[])
 
-  const saveState=useCallback(async(nf,ng,ni)=>{
-    await supabase.from('tournament_state').upsert({id:1,state:{flights:nf,generated:ng,indoor:ni}})
-  },[])
+  // Save queue — ensures writes to Supabase are sequential, never concurrent
+  const saveQueueRef = useRef(Promise.resolve())
+  const pendingSaveRef = useRef(null)
+  const generatedRef = useRef(generated)
+  const indoorRef = useRef(indoor)
+  useEffect(()=>{ generatedRef.current = generated },[generated])
+  useEffect(()=>{ indoorRef.current = indoor },[indoor])
 
-  function handleGenerate(nf){setFlights(nf);setGenerated(true);setTab('oop');saveState(nf,true,indoor)}
-  function handleFlightUpdate(fi,uf){const next=[...flights];next[fi]=uf;setFlights(next);saveState(next,generated,indoor)}
+  const saveState = useCallback((nf, ng, ni) => {
+    pendingSaveRef.current = { nf, ng, ni }
+    saveQueueRef.current = saveQueueRef.current.then(async () => {
+      const pending = pendingSaveRef.current
+      if (!pending) return
+      pendingSaveRef.current = null
+      try {
+        await supabase.from('tournament_state').upsert({ id:1, state:{ flights:pending.nf, generated:pending.ng, indoor:pending.ni } })
+      } catch(e) {
+        console.error('Save error:', e)
+      }
+    })
+  }, [])
+
+  function handleGenerate(nf) {
+    setFlights(nf); setGenerated(true); setTab('oop')
+    saveState(nf, true, indoorRef.current)
+  }
+
+  function handleFlightUpdate(fi, uf) {
+    setFlights(prev => {
+      const next = [...prev]
+      next[fi] = uf
+      saveState(next, generatedRef.current, indoorRef.current)
+      return next
+    })
+  }
   function handleIndoorToggle(){
     const msg=indoor?'Move outside? Switches to standard outdoor format. All results preserved.':'Go indoor? All matches will be 8-game prosets, no-ad. All results preserved.'
     if(!confirm(msg))return
