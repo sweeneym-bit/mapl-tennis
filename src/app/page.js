@@ -347,12 +347,25 @@ function FlightView({flight,isAdmin,indoor,onUpdate}){
   const[modal,setModal]=useState(null)
   const isDoubles=flight.isDoubles
 
-  function handleAdvance(localId,winnerSeed){onUpdate(advanceBracket(flight,localId,winnerSeed))}
-  function handleSaveScores(localId,scores,proset){const next=JSON.parse(JSON.stringify(flight));next.matches[localId].scores=scores;next.matches[localId].proset=proset;onUpdate(next)}
+  // Always pass a updater function so parent can apply to freshest state
+  function handleAdvance(localId,winnerSeed){
+    onUpdate(current => advanceBracket(current, localId, winnerSeed))
+  }
+  function handleSaveScores(localId,scores,proset){
+    onUpdate(current => {
+      const next=JSON.parse(JSON.stringify(current))
+      next.matches[localId].scores=scores;next.matches[localId].proset=proset
+      return next
+    })
+  }
   function confirmEdit(localId){
-    const next=JSON.parse(JSON.stringify(flight))
-    collectDownstream(localId).forEach(id=>{const fs=FIXED[id];next.matches[id]={...next.matches[id],p1:fs.p1,p2:fs.p2,winner:null,loser:null,scores:null,proset:indoor?true:isProsetMatch(flight.flightIdx,id)}})
-    next.points=recomputePoints(next);onUpdate(next);setModal({type:'score',localId})
+    onUpdate(current => {
+      const next=JSON.parse(JSON.stringify(current))
+      collectDownstream(localId).forEach(id=>{const fs=FIXED[id];next.matches[id]={...next.matches[id],p1:fs.p1,p2:fs.p2,winner:null,loser:null,scores:null,proset:indoor?true:isProsetMatch(current.flightIdx,id)}})
+      next.points=recomputePoints(next)
+      return next
+    })
+    setModal({type:'score',localId})
   }
   function mkCard(id){
     const m=flight.matches[id],clickable=!m.winner&&isAdmin
@@ -497,8 +510,16 @@ function IndoorOOP({flights,isAdmin,inProgress,setInProgress,onMoveOutside,onFli
 
   function toggleIP(f,lid){const key=`${f}-${lid}`;const next=new Set(inProgress);if(next.has(key))next.delete(key);else next.add(key);setInProgress(next)}
 
-  function handleAdvance(f,localId,winnerSeed){onFlightUpdate(f,advanceBracket(flights[f],localId,winnerSeed))}
-  function handleSaveScores(f,localId,scores,proset){const next=JSON.parse(JSON.stringify(flights[f]));next.matches[localId].scores=scores;next.matches[localId].proset=proset;onFlightUpdate(f,next)}
+  function handleAdvance(f,localId,winnerSeed){
+    onFlightUpdate(f, current => advanceBracket(current, localId, winnerSeed))
+  }
+  function handleSaveScores(f,localId,scores,proset){
+    onFlightUpdate(f, current => {
+      const next=JSON.parse(JSON.stringify(current))
+      next.matches[localId].scores=scores;next.matches[localId].proset=proset
+      return next
+    })
+  }
 
   return(
     <div>
@@ -733,7 +754,8 @@ export default function App(){
   function handleFlightUpdate(fi, uf) {
     setFlights(prev => {
       const next = [...prev]
-      next[fi] = uf
+      // uf can be either a flight object or an updater function (for race-safe updates)
+      next[fi] = typeof uf === 'function' ? uf(prev[fi]) : uf
       saveState(next, generatedRef.current, indoorRef.current)
       return next
     })
