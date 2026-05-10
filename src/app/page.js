@@ -717,6 +717,8 @@ export default function App(){
     }
     load()
     const ch=supabase.channel('tournament').on('postgres_changes',{event:'UPDATE',schema:'public',table:'tournament_state'},payload=>{
+      // Only apply real-time updates from OTHER devices, not our own saves
+      if(isSavingRef.current) return
       const s=payload.new.state
       const fls=(s.flights||[null,null,null,null,null]).map((fl,i)=>fl?{...fl,flightIdx:i,isDoubles:i===4}:null)
       setFlights(fls);setGenerated(s.generated||false);setIndoor(s.indoor||false)
@@ -729,6 +731,7 @@ export default function App(){
   const pendingSaveRef = useRef(null)
   const generatedRef = useRef(generated)
   const indoorRef = useRef(indoor)
+  const isSavingRef = useRef(false)
   useEffect(()=>{ generatedRef.current = generated },[generated])
   useEffect(()=>{ indoorRef.current = indoor },[indoor])
 
@@ -738,10 +741,14 @@ export default function App(){
       const pending = pendingSaveRef.current
       if (!pending) return
       pendingSaveRef.current = null
+      isSavingRef.current = true
       try {
         await supabase.from('tournament_state').upsert({ id:1, state:{ flights:pending.nf, generated:pending.ng, indoor:pending.ni } })
       } catch(e) {
         console.error('Save error:', e)
+      } finally {
+        // Keep the flag up briefly so the realtime echo doesn't overwrite us
+        setTimeout(() => { isSavingRef.current = false }, 2000)
       }
     })
   }, [])
